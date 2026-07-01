@@ -1,0 +1,139 @@
+# =============================================================================
+# GitHub Actions workflow: 100% FREE hosting for the Telegram Job Mail Bot.
+# =============================================================================
+# WHY THIS EXISTS
+# ----------------
+# GitHub Actions gives PUBLIC repositories UNLIMITED free minutes, but a
+# single job run cannot execute forever -- it must finish within a bounded
+# time. To work around this for a bot that would normally run 24/7:
+#
+#   1. bot.py is configured (via AUTO_SHUTDOWN_MINUTES) to automatically
+#      and gracefully stop itself after ~25 minutes.
+#   2. This workflow is scheduled to trigger a brand-new run every 30
+#      minutes (cron below).
+#   3. Because runs are queued (see the `concurrency` block), the next
+#      scheduled run waits until the previous one has fully stopped, then
+#      starts immediately -- giving a "run ~25 min -> rest ~5 min -> run
+#      again" cycle, exactly as requested, at zero cost.
+#
+# NOTE: GitHub's cron scheduler is best-effort and can be delayed by a few
+# minutes under high load, especially on the free tier. The bot will still
+# always eventually restart, but the exact 30-minute cadence is not a hard
+# real-time guarantee.
+#
+# REQUIRED GITHUB SECRETS (Settings -> Secrets and variables -> Actions):
+#   TELEGRAM_BOT_TOKEN     - from @BotFather
+#   SMTP_EMAIL             - your Gmail address
+#   SMTP_APP_PASSWORD      - your Gmail App Password
+#   APPLICANT_NAME         - your full name
+#   APPLICANT_ROLE         - target role, e.g. "Software Engineer Internship"
+#   RESUME_BASE64          - your resume.pdf, base64-encoded (see README.md
+#                            for the exact command to generate this). This
+#                            keeps your real resume OUT of the public repo.
+#
+# OPTIONAL GITHUB SECRETS (safe to skip -- sensible defaults are used):
+#   SENDER_NAME, APPLICANT_PHONE, APPLICANT_LINKEDIN, APPLICANT_PORTFOLIO,
+#   NUM_SUBJECT_SUGGESTIONS, DUPLICATE_EMAIL_COOLDOWN_HOURS,
+#   ALLOWED_TELEGRAM_USER_IDS, LOG_LEVEL
+# =============================================================================
+
+name: Run Telegram Job Mail Bot (Free Scheduled Hosting)
+
+on:
+  # Re-trigger a fresh run every 30 minutes, around the clock.
+  schedule:
+    - cron: "*/30 * * * *"
+  # Allow manually starting a run from the GitHub Actions tab (useful for
+  # testing your secrets/configuration without waiting for the schedule).
+  workflow_dispatch: {}
+
+# Ensures only ONE run of the bot is ever active at a time. If a new
+# scheduled run fires while a previous run is still executing, it will
+# queue (wait) rather than run in parallel or cancel the active one --
+# this is what naturally creates the "rest" period between cycles.
+concurrency:
+  group: telegram-job-mail-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    # Slightly above AUTO_SHUTDOWN_MINUTES to leave headroom for setup/teardown.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Restore the SQLite database (sent-email history / cooldown tracking)
+      # from the most recent cache entry, if one exists. GitHub Actions
+      # cache entries are immutable per key, so we always save under a
+      # unique key (the run ID) and fall back to the newest previous entry
+      # via `restore-keys`.
+      - name: Restore SQLite database cache
+        id: restore-db
+        uses: actions/cache/restore@v4
+        with:
+          path: job_mail_bot.db
+          key: sqlite-db-${{ github.run_id }}
+          restore-keys: |
+            sqlite-db-
+
+      # Decode the resume from a base64-encoded secret so the real resume
+      # file never has to be committed to the (public) repository.
+      - name: Restore resume.pdf from secret
+        run: |
+          if [ -z "${{ secrets.RESUME_BASE64 }}" ]; then
+            echo "ERROR: RESUME_BASE64 secret is not set. Please add it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "${{ secrets.RESUME_BASE64 }}" | base64 --decode > resume.pdf
+          echo "resume.pdf restored ($(wc -c < resume.pdf) bytes)."
+
+      # Write all required configuration into a .env file for this run.
+      # GitHub automatically masks any of these values in the logs.
+      - name: Write .env file from secrets
+        run: |
+          cat > .env <<EOF
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SMTP_EMAIL=${{ secrets.SMTP_EMAIL }}
+          SMTP_APP_PASSWORD=${{ secrets.SMTP_APP_PASSWORD }}
+          SENDER_NAME=${{ secrets.SENDER_NAME }}
+          APPLICANT_NAME=${{ secrets.APPLICANT_NAME }}
+          APPLICANT_PHONE=${{ secrets.APPLICANT_PHONE }}
+          APPLICANT_LINKEDIN=${{ secrets.APPLICANT_LINKEDIN }}
+          APPLICANT_PORTFOLIO=${{ secrets.APPLICANT_PORTFOLIO }}
+          APPLICANT_ROLE=${{ secrets.APPLICANT_ROLE }}
+          NUM_SUBJECT_SUGGESTIONS=${{ secrets.NUM_SUBJECT_SUGGESTIONS || '7' }}
+          DUPLICATE_EMAIL_COOLDOWN_HOURS=${{ secrets.DUPLICATE_EMAIL_COOLDOWN_HOURS || '24' }}
+          ALLOWED_TELEGRAM_USER_IDS=${{ secrets.ALLOWED_TELEGRAM_USER_IDS }}
+          LOG_LEVEL=${{ secrets.LOG_LEVEL || 'INFO' }}
+          # The bot will gracefully stop itself after this many minutes so
+          # this scheduled workflow can restart a fresh run (free-hosting trick).
+          AUTO_SHUTDOWN_MINUTES=25
+          EOF
+          echo ".env file written."
+
+      # Run the bot. It will poll Telegram for ~25 minutes and then stop
+      # itself cleanly (see AUTO_SHUTDOWN_MINUTES above / bot.py). `|| true`
+      # ensures a transient error doesn't mark the whole workflow as failed
+      # and doesn't affect future scheduled runs.
+      - name: Run bot (auto-stops after ~25 minutes)
+        run: python bot.py || true
+
+      # Always save the latest state of the database, even if the run above
+      # encountered an error, so history/cooldown data isn't lost.
+      - name: Save SQLite database cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: job_mail_bot.db
+          key: sqlite-db-${{ github.run_id }}

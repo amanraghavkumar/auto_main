@@ -1,0 +1,49 @@
+# Environment variables (contains secrets - never commit this)
+.env
+env.local
+env
+env/
+env*
+.env.example
+.env.example/
+
+# SQLite database (runtime-generated, contains sent-email history)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE / editor settings
+.vscode/
+.idea/
+*.swp
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
